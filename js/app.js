@@ -2,12 +2,19 @@ $(function () {
   'use strict';
 
   var $root = $('html');
+  var $win = $(window);
   var $top = $('#btn-top');
 
   $('#btn-theme').on('click', function () {
     var next = $root.attr('data-theme') === 'dark' ? 'light' : 'dark';
     $root.attr('data-theme', next);
     try { localStorage.setItem('theme', next); } catch (e) {}
+  });
+
+  var mq = matchMedia('(prefers-color-scheme: dark)');
+  mq.addEventListener('change', function (e) {
+    try { localStorage.removeItem('theme'); } catch (err) {}
+    $root.attr('data-theme', e.matches ? 'dark' : 'light');
   });
 
   $(document).on('pointerdown', '.ripple', function (e) {
@@ -21,73 +28,101 @@ $(function () {
     }).appendTo(this).on('animationend', function () { $(this).remove(); });
   });
 
-  $(window).on('scroll', function () { $top.toggleClass('show', $(window).scrollTop() > 300)}).trigger('scroll');
+  var $cards = $('.card').addClass('reveal');
+  var winH = $win.height();
+  var ticking = false;
 
-  $top.on('click', function () { $('html, body').animate({ scrollTop: 0 }, 400)});
+  function onFrame() {
+    ticking = false;
+    var y = $win.scrollTop();
+    $top.toggleClass('show', y > 300);
+    if ($cards.length) {
+      var limit = y + winH - 40;
+      $cards = $cards.filter(function () {
+        if ($(this).offset().top >= limit) return true;
+        $(this).addClass('in');
+        return false;
+      });
+    }
+  }
+  function schedule() { if (!ticking) { ticking = true; requestAnimationFrame(onFrame); }}
+  $win.on('scroll', schedule).on('resize', function () { winH = $win.height(); schedule(); });
+  onFrame();
 
-  var $box = $('<div class="lightbox" role="dialog" aria-modal="true" aria-label="圖片預覽" tabindex="-1" hidden>' + '<img class="lightbox-img" alt="">' + '</div>').appendTo('body');
+  $top.on('click', function () { $('html, body').stop(true).animate({ scrollTop: 0 }, 400)});
+  $win.on('wheel touchstart keydown', function () { $('html, body').stop(true); });
+
+  var $box = $('<div class="lightbox" role="dialog" aria-modal="true" aria-label="圖片預覽" tabindex="-1" hidden>' + '<div class="lightbox-scrim"></div><img class="lightbox-img" alt="">' + '</div>').appendTo('body');
   var boxImg = $box.find('.lightbox-img')[0];
-  var $lastTrigger = null;
-  var anim = null;
-  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var scrim = $box.find('.lightbox-scrim')[0];
+  var $thumb = null;
+  var isOpen = false;
+  var anims = [];
+  var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   var EASE = 'cubic-bezier(.2, .9, .3, 1)';
+  var NO_SHADOW = '0 0 0 rgba(0,0,0,0), 0 0 0 rgba(0,0,0,0)';
 
-  function fromThumb() {
-    var t = $lastTrigger[0].getBoundingClientRect();
+  function cancelAnims() {
+    for (var i = 0; i < anims.length; i++) anims[i].cancel();
+    anims = [];
+  }
+
+  function thumbTransform() {
+    var t = $thumb[0].getBoundingClientRect();
     var b = boxImg.getBoundingClientRect();
     return 'translate(' + (t.left - b.left) + 'px,' + (t.top - b.top) + 'px) scale(' + (t.width / b.width) + ')';
   }
 
-  function play(from, to, ms, done) {
-    if (anim) anim.cancel();
-    anim = boxImg.animate([{ transform: from }, { transform: to }], { duration: reduceMotion ? 0 : ms, easing: EASE, fill: 'forwards'});
-    if (!done) return;
-    var called = false;
-    function once() { if (!called) { called = true; done(); } }
-    anim.onfinish = once;
-    setTimeout(once, ms + 60);
-  }
+  function animateTo(open, live) {
+    var curT = live ? getComputedStyle(boxImg).transform : null;
+    var curO = live ? getComputedStyle(scrim).opacity : 0;
+    var curS = live ? getComputedStyle(boxImg).boxShadow : NO_SHADOW;
+    cancelAnims();
+    var fullS = getComputedStyle(boxImg).boxShadow;
 
-  function openBox($img) {
-    $lastTrigger = $img;
-    boxImg.alt = $img.attr('alt') || '';
-    boxImg.style.visibility = 'hidden';
-    boxImg.src = $img.attr('src');
-    $box.removeClass('closing').prop('hidden', false);
-    $('body').addClass('no-scroll');
-    $box.trigger('focus');
-    function start() {
-      if ($box.prop('hidden')) return;
-      var from = fromThumb();
-      boxImg.style.visibility = '';
-      $img.css('visibility', 'hidden');
-      play(from, 'none', 280);
-    }
-    if (boxImg.complete && boxImg.naturalWidth) start();
-    else $(boxImg).one('load', start);
-  }
+    var thumbT = thumbTransform();
+    var opts = { duration: reduceMotion ? 0 : (open ? 280 : 220), easing: EASE, fill: 'forwards' };
+    var a = boxImg.animate([{ transform: live ? curT : thumbT, boxShadow: curS }, { transform: open ? 'none' : thumbT, boxShadow: open ? fullS : NO_SHADOW }], opts);
+    var b = scrim.animate([{ opacity: curO }, { opacity: open ? 1 : 0 }], opts);
+    anims = [a, b];
+    $thumb.css('visibility', 'hidden');
 
-  function closeBox() {
-    if ($box.prop('hidden') || $box.hasClass('closing')) return;
-    $box.addClass('closing');
-    play('none', fromThumb(), 220, function () {
-      if (anim) anim.cancel();
-      $box.prop('hidden', true).removeClass('closing');
+    a.onfinish = function () {
+      cancelAnims();
+      if (open) return;
+      $box.prop('hidden', true);
       $('body').removeClass('no-scroll');
-      $lastTrigger.css('visibility', '').trigger('focus');
-    });
+      $thumb.css('visibility', '').trigger('focus');
+    };
   }
 
-  $('img.zoomable').attr({ tabindex: 0, role: 'button' }).on('click', function () { openBox($(this))}).on('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openBox($(this)); }});
+  function setOpen(open, $img) {
+    if (open === isOpen) return;
+    isOpen = open;
+    if (!open) return animateTo(false, true);
 
-  $box.on('click', closeBox);
-  $(document).on('keydown', function (e) { if (e.key === 'Escape') closeBox()});
-
-  var $cards = $('.card').addClass('reveal');
-  function reveal() {
-    var bottom = $(window).scrollTop() + $(window).height();
-    $cards.not('.in').each(function () { if ($(this).offset().top < bottom - 40) $(this).addClass('in')});
+    if ($img) {
+      if ($thumb && $thumb[0] !== $img[0]) $thumb.css('visibility', '');
+      $thumb = $img;
+      boxImg.alt = $img.attr('alt') || '';
+      var src = $img.attr('src');
+      if (boxImg.getAttribute('src') !== src) boxImg.src = src;
+    }
+    var wasHidden = $box.prop('hidden');
+    $box.prop('hidden', false);
+    if (wasHidden) {
+      $('body').addClass('no-scroll');
+      $box.trigger('focus');
+    }
+    var live = !wasHidden;
+    if (boxImg.complete && boxImg.naturalWidth) animateTo(true, live);
+    else $(boxImg).one('load', function () { if (isOpen) animateTo(true, live); });
   }
-  $(window).on('scroll resize', reveal);
-  reveal();
+
+  function toggleFromBox() { setOpen(!isOpen); }
+
+  $('img.zoomable').attr({ tabindex: 0, role: 'button' }).on('click', function () { setOpen(true, $(this))}).on('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(true, $(this)); }});
+
+  $box.on('click', toggleFromBox);
+  $(document).on('keydown', function (e) { if (e.key === 'Escape') setOpen(false); });
 });
